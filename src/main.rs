@@ -1,7 +1,10 @@
 use crossterm::style::{Attribute, Color, Stylize};
 use nom::{
     bytes::complete::{tag, take_till},
-    character::complete::{alpha1, alphanumeric1, char, i64, not_line_ending},
+    character::complete::{
+        alpha1 as metrictype, alphanumeric1 as metricname, alphanumeric1 as labelkey, char, i64,
+        not_line_ending,
+    },
     multi::separated_list1,
     sequence::{delimited, pair, separated_pair, tuple},
 };
@@ -10,7 +13,7 @@ fn parse_help(line: &str) -> (&str, &str) {
     let mut p_help = tuple((
         tag::<&str, &str, nom::error::Error<&str>>("# HELP"),
         char(' '),
-        alphanumeric1,
+        metricname,
         char(' '),
         not_line_ending,
     ));
@@ -23,9 +26,9 @@ fn parse_type(line: &str) -> (&str, &str) {
     let mut p_type = tuple((
         tag::<&str, &str, nom::error::Error<&str>>("# TYPE"),
         char(' '),
-        alphanumeric1,
+        metricname,
         char(' '),
-        alpha1,
+        metrictype,
     ));
 
     let (remain, (_, _, name, _, typ)) = p_type(line).unwrap();
@@ -37,13 +40,13 @@ fn parse_metric(
 ) -> Result<(&str, Vec<(&str, &str)>, i64), nom::Err<nom::error::Error<&str>>> {
     let mut p_metric = separated_pair(
         pair(
-            alphanumeric1::<&str, nom::error::Error<&str>>,
+            metricname::<&str, nom::error::Error<&str>>,
             delimited(
                 char('{'),
                 separated_list1(
                     char(','),
                     separated_pair(
-                        alphanumeric1, // TODO: factor these out as metric_name, dimension_label, etc, and confirm format
+                        labelkey,
                         char('='),
                         delimited(char('\"'), take_till(|c| c == '\"'), char('\"')),
                     ),
