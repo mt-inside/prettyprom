@@ -6,8 +6,7 @@ use nom::{
     sequence::{delimited, pair, separated_pair, tuple},
 };
 
-// TODO: try having these return &str - should be possible as they're borrowing their input.
-fn parse_help(line: &str) -> (String, String) {
+fn parse_help(line: &str) -> (&str, &str) {
     let mut p_help = tuple((
         tag::<&str, &str, nom::error::Error<&str>>("# HELP"),
         char(' '),
@@ -18,9 +17,9 @@ fn parse_help(line: &str) -> (String, String) {
 
     let (remain, (_, _, name, _, desc)) = p_help(line).unwrap();
     assert_eq!(remain, "");
-    (name.to_owned(), desc.to_owned())
+    (name, desc)
 }
-fn parse_type(line: &str) -> (String, String) {
+fn parse_type(line: &str) -> (&str, &str) {
     let mut p_type = tuple((
         tag::<&str, &str, nom::error::Error<&str>>("# TYPE"),
         char(' '),
@@ -31,11 +30,11 @@ fn parse_type(line: &str) -> (String, String) {
 
     let (remain, (_, _, name, _, typ)) = p_type(line).unwrap();
     assert_eq!(remain, "");
-    (name.to_owned(), typ.to_owned())
+    (name, typ)
 }
 fn parse_metric(
     line: &str,
-) -> Result<(String, Vec<(String, String)>, i64), nom::Err<nom::error::Error<&str>>> {
+) -> Result<(&str, Vec<(&str, &str)>, i64), nom::Err<nom::error::Error<&str>>> {
     let mut p_metric = separated_pair(
         pair(
             alphanumeric1::<&str, nom::error::Error<&str>>,
@@ -58,14 +57,7 @@ fn parse_metric(
 
     let (remain, ((name, labels), val)) = p_metric(line)?;
     assert_eq!(remain, "");
-    Ok((
-        name.to_owned(),
-        labels
-            .into_iter()
-            .map(|(k, v)| (k.to_owned(), v.to_owned()))
-            .collect(),
-        val,
-    ))
+    Ok((name, labels, val))
 }
 
 fn main() -> anyhow::Result<()> {
@@ -80,8 +72,8 @@ fn main() -> anyhow::Result<()> {
         let help_line = hack_help_line.unwrap_or_else(|| lines.next().unwrap().unwrap());
         let type_line = lines.next().unwrap().unwrap();
 
-        let (ref name, ref desc) = parse_help(&help_line);
-        let (ref type_name, ref typ) = parse_type(&type_line);
+        let (name, desc) = parse_help(&help_line);
+        let (type_name, typ) = parse_type(&type_line);
         assert_eq!(type_name, name);
 
         // TODO: show total for this metric. Also sort the outputs by value - have a
@@ -89,15 +81,15 @@ fn main() -> anyhow::Result<()> {
         // flow better
         println!(
             "{} {} \"{}\"",
-            name.clone().attribute(Attribute::Bold),
-            typ.clone().with(Color::DarkGrey),
+            name.attribute(Attribute::Bold),
+            typ.with(Color::DarkGrey),
             desc,
         );
 
         'metrics: loop {
             // Stop on EOF, read error
             if let Some(ref metric) = lines.next().and_then(|l| l.ok()) {
-                if let Ok((ref metric_name, ref labels, val)) = parse_metric(metric) {
+                if let Ok((metric_name, labels, val)) = parse_metric(metric) {
                     assert_eq!(metric_name, name);
 
                     print!(
@@ -107,11 +99,7 @@ fn main() -> anyhow::Result<()> {
                             .attribute(Attribute::Bold)
                     );
                     for (k, v) in labels {
-                        print!(
-                            "{}: {} ",
-                            k.clone().with(Color::Blue),
-                            v.clone().with(Color::Green)
-                        );
+                        print!("{}: {} ", k.with(Color::Blue), v.with(Color::Green));
                     }
                     println!();
                 } else {
