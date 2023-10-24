@@ -1,19 +1,23 @@
 use crossterm::style::{Attribute, Color, Stylize};
 use nom::{
-    bytes::complete::{tag, take_till},
-    character::complete::{
-        alpha1 as metrictype, alphanumeric1 as metricname, alphanumeric1 as labelkey, char, i64,
-        not_line_ending,
-    },
+    bytes::complete::{tag, take_till, take_while1},
+    character::complete::{alpha1 as metrictype, alphanumeric1 as labelkey, char, not_line_ending},
+    character::is_alphanumeric,
+    combinator::opt,
     multi::separated_list1,
+    number::complete::float,
     sequence::{delimited, pair, separated_pair, tuple},
 };
+
+fn is_metricname(c: char) -> bool {
+    is_alphanumeric(c as u8) || c == '_'
+}
 
 fn parse_help(line: &str) -> (&str, &str) {
     let mut p_help = tuple((
         tag::<&str, &str, nom::error::Error<&str>>("# HELP"),
         char(' '),
-        metricname,
+        take_while1(is_metricname),
         char(' '),
         not_line_ending,
     ));
@@ -26,7 +30,7 @@ fn parse_type(line: &str) -> (&str, &str) {
     let mut p_type = tuple((
         tag::<&str, &str, nom::error::Error<&str>>("# TYPE"),
         char(' '),
-        metricname,
+        take_while1(is_metricname),
         char(' '),
         metrictype,
     ));
@@ -37,11 +41,11 @@ fn parse_type(line: &str) -> (&str, &str) {
 }
 fn parse_metric(
     line: &str,
-) -> Result<(&str, Vec<(&str, &str)>, i64), nom::Err<nom::error::Error<&str>>> {
+) -> Result<(&str, Vec<(&str, &str)>, f32), nom::Err<nom::error::Error<&str>>> {
     let mut p_metric = separated_pair(
         pair(
-            metricname::<&str, nom::error::Error<&str>>,
-            delimited(
+            take_while1(is_metricname),
+            opt(delimited(
                 char('{'),
                 separated_list1(
                     char(','),
@@ -52,21 +56,19 @@ fn parse_metric(
                     ),
                 ),
                 char('}'),
-            ),
+            )),
         ),
         char(' '),
-        i64, // TODO: what about floats? What's the rules for the various types? Is it type-speicif? Will nom parse "3" as a float?
+        float,
     );
 
     let (remain, ((name, labels), val)) = p_metric(line)?;
     assert_eq!(remain, "");
-    Ok((name, labels, val))
+    Ok((name, labels.unwrap_or(vec![]), val))
 }
 
 fn main() -> anyhow::Result<()> {
     // TODO: tests!
-
-    // TODO: check the output of all the different metrics types (from the Golang lib), think about how to render them, esp histograms
 
     let mut lines = std::io::stdin().lines();
     let mut hack_help_line = None;
@@ -90,10 +92,12 @@ fn main() -> anyhow::Result<()> {
         );
 
         'metrics: loop {
-            // Stop on EOF, read error
+            // On EOF / read error; ie no more input, stop
             if let Some(ref metric) = lines.next().and_then(|l| l.ok()) {
+                // On parse error, assume we're at the end of the metrics block and go back to beginning
                 if let Ok((metric_name, labels, val)) = parse_metric(metric) {
-                    assert_eq!(metric_name, name);
+                    assert!(metric_name.starts_with(name));
+                    // TODO: handle hists etc. Will get a foo_sum (and count?); at least handle that. Ideally render hist buckets (by other labels). Needs the parse_metricS()
 
                     print!(
                         "  {}\t",
