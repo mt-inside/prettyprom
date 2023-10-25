@@ -67,13 +67,146 @@ fn parse_metric(
     Ok((name, labels.unwrap_or(vec![]), val))
 }
 
+trait MetricParser {
+    fn parse_line(&mut self, line_name: &str, labels: Vec<(&str, &str)>, val: f32);
+    fn render(&self);
+}
+
+struct GaugeCounterParser {}
+
+impl GaugeCounterParser {
+    fn new() -> Self {
+        Self {}
+    }
+}
+
+impl MetricParser for GaugeCounterParser {
+    fn parse_line(&mut self, line_name: &str, labels: Vec<(&str, &str)>, val: f32) {
+        print!(
+            "  {}\t",
+            format!("{}", val)
+                .with(Color::White)
+                .attribute(Attribute::Bold)
+        );
+        for (k, v) in labels {
+            print!("{}={} ", k.with(Color::Blue), v.with(Color::Green));
+        }
+        println!();
+    }
+    fn render(&self) {
+        println!("TODO");
+    }
+}
+
+struct HistSummaryParser {
+    metric_name: String, // TODO: can borrow?
+    bs: Vec<(String, f32)>,
+}
+
+impl HistSummaryParser {
+    fn new(metric_name: &str) -> Self {
+        Self {
+            metric_name: metric_name.to_owned(),
+            bs: vec![],
+        }
+    }
+}
+
+impl MetricParser for HistSummaryParser {
+    fn parse_line(&mut self, line_name: &str, labels: Vec<(&str, &str)>, val: f32) {
+        // TODO: factor out with hist
+        // TODO: calc mean for both types
+        let suffix = if line_name == self.metric_name {
+            ""
+        } else {
+            &line_name[self.metric_name.len() + 1..]
+        };
+        match suffix {
+            "" => {
+                // Summary
+                for (k, v) in labels {
+                    if k == "quantile" {
+                        self.bs.push((v.to_owned(), val));
+                    }
+                }
+            }
+            "bucket" => {
+                // Histogram
+                for (k, v) in labels {
+                    if k == "le" {
+                        self.bs.push((v.to_owned(), val));
+                    }
+                }
+            }
+            "sum" => {
+                print!("  ");
+                print!(
+                    "{} {} ",
+                    suffix,
+                    format!("{}", val)
+                        .with(Color::White)
+                        .attribute(Attribute::Bold)
+                );
+            }
+            "count" => {
+                print!(
+                    "{} {} ",
+                    suffix,
+                    format!("{}", val)
+                        .with(Color::White)
+                        .attribute(Attribute::Bold)
+                );
+                print!("(");
+                for (k, v) in &self.bs {
+                    print!("{} {}, ", k.clone().with(Color::DarkGrey), v);
+                }
+                print!(")");
+                self.bs.clear(); // TODO unnecessary now?
+                print!(" ");
+                for (k, v) in labels {
+                    if k != "le" {
+                        print!("{}={} ", k.with(Color::Blue), v.with(Color::Green));
+                    }
+                }
+                println!()
+            }
+            _ => panic!("Unknown suffix {}", suffix),
+        }
+    }
+    fn render(&self) {
+        println!("TODO");
+    }
+}
+
+fn parse_metrics(
+    lines: &mut std::io::Lines<std::io::StdinLock<'static>>,
+    metric_name: &str,
+    parser: &mut Box<dyn MetricParser>,
+) -> ((), Option<String>) {
+    loop {
+        // On EOF / read error; ie no more input, stop
+        if let Some(ref metric) = lines.next().and_then(|l| l.ok()) {
+            // On parse error, assume we're at the end of the metrics block and go back to beginning
+            if let Ok((line_name, labels, val)) = parse_metric(metric) {
+                assert!(line_name.starts_with(metric_name));
+
+                parser.parse_line(line_name, labels, val);
+            } else {
+                return ((), Some(metric.to_owned()));
+            }
+        } else {
+            return ((), None);
+        }
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     // TODO: tests!
 
     let mut lines = std::io::stdin().lines();
     let mut hack_help_line = None;
 
-    'all: loop {
+    loop {
         let help_line = hack_help_line.unwrap_or_else(|| lines.next().unwrap().unwrap());
         let type_line = lines.next().unwrap().unwrap();
 
@@ -91,31 +224,14 @@ fn main() -> anyhow::Result<()> {
             desc,
         );
 
-        'metrics: loop {
-            // On EOF / read error; ie no more input, stop
-            if let Some(ref metric) = lines.next().and_then(|l| l.ok()) {
-                // On parse error, assume we're at the end of the metrics block and go back to beginning
-                if let Ok((metric_name, labels, val)) = parse_metric(metric) {
-                    assert!(metric_name.starts_with(name));
-                    // TODO: handle hists etc. Will get a foo_sum (and count?); at least handle that. Ideally render hist buckets (by other labels). Needs the parse_metricS()
-
-                    print!(
-                        "  {}\t",
-                        format!("{}", val)
-                            .with(Color::White)
-                            .attribute(Attribute::Bold)
-                    );
-                    for (k, v) in labels {
-                        print!("{}: {} ", k.with(Color::Blue), v.with(Color::Green));
-                    }
-                    println!();
-                } else {
-                    hack_help_line = Some(metric.clone());
-                    break 'metrics;
-                }
-            } else {
-                break 'all;
-            }
+        let mut parser: Box<dyn MetricParser> = match typ {
+            "gauge" | "counter" => Box::new(GaugeCounterParser::new()),
+            "histogram" | "summary" => Box::new(HistSummaryParser::new(name)),
+            _ => panic!("Unknown metric type"),
+        };
+        (_, hack_help_line) = parse_metrics(&mut lines, name, &mut parser);
+        if hack_help_line.is_none() {
+            break;
         }
     }
 
