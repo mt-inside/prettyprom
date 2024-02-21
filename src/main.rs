@@ -68,7 +68,7 @@ fn parse_metric(
 }
 
 trait MetricParser {
-    fn parse_line(&mut self, line_name: &str, labels: Vec<(&str, &str)>, val: f32);
+    fn parse_line(&mut self, line_name: &str, labels: Vec<(&str, &str)>, val: f32) -> bool;
     fn render(&self);
 }
 
@@ -81,7 +81,7 @@ impl GaugeCounterParser {
 }
 
 impl MetricParser for GaugeCounterParser {
-    fn parse_line(&mut self, line_name: &str, labels: Vec<(&str, &str)>, val: f32) {
+    fn parse_line(&mut self, line_name: &str, labels: Vec<(&str, &str)>, val: f32) -> bool {
         print!(
             "  {}\t",
             format!("{}", val)
@@ -92,7 +92,9 @@ impl MetricParser for GaugeCounterParser {
             print!("{}={} ", k.with(Color::Blue), v.with(Color::Green));
         }
         println!();
+        false
     }
+
     fn render(&self) {
         println!("TODO");
     }
@@ -101,6 +103,9 @@ impl MetricParser for GaugeCounterParser {
 struct HistSummaryParser {
     metric_name: String, // TODO: can borrow?
     bs: Vec<(String, f32)>,
+    labels: Vec<(String, String)>,
+    sum: f32,
+    count: f32,
 }
 
 impl HistSummaryParser {
@@ -108,12 +113,15 @@ impl HistSummaryParser {
         Self {
             metric_name: metric_name.to_owned(),
             bs: vec![],
+            labels: vec![],
+            sum: 0.0,
+            count: 0.0,
         }
     }
 }
 
 impl MetricParser for HistSummaryParser {
-    fn parse_line(&mut self, line_name: &str, labels: Vec<(&str, &str)>, val: f32) {
+    fn parse_line(&mut self, line_name: &str, labels: Vec<(&str, &str)>, val: f32) -> bool {
         // TODO: factor out with hist
         // TODO: calc mean for both types
         let suffix = if line_name == self.metric_name {
@@ -129,6 +137,7 @@ impl MetricParser for HistSummaryParser {
                         self.bs.push((v.to_owned(), val));
                     }
                 }
+                false
             }
             "bucket" => {
                 // Histogram
@@ -137,52 +146,74 @@ impl MetricParser for HistSummaryParser {
                         self.bs.push((v.to_owned(), val));
                     }
                 }
+                false
             }
             "sum" => {
-                print!("  ");
-                print!(
-                    "{} {} ",
-                    suffix,
-                    format!("{}", val)
-                        .with(Color::White)
-                        .attribute(Attribute::Bold)
-                );
+                self.sum = val;
+                false
             }
             "count" => {
-                print!(
-                    "{} {} ",
-                    suffix,
-                    format!("{}", val)
-                        .with(Color::White)
-                        .attribute(Attribute::Bold)
-                );
-                print!("(");
-                for (k, v) in &self.bs {
-                    print!("{} {}, ", k.clone().with(Color::DarkGrey), v);
-                }
-                print!(")");
-                self.bs.clear(); // TODO unnecessary now?
-                print!(" ");
-                for (k, v) in labels {
-                    if k != "le" {
-                        print!("{}={} ", k.with(Color::Blue), v.with(Color::Green));
-                    }
-                }
-                println!()
+                self.count = val;
+                let foo = labels
+                    .into_iter()
+                    .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                    .collect::<Vec<(String, String)>>();
+                self.labels = foo;
+                true
             }
             _ => panic!("Unknown suffix {}", suffix),
         }
     }
+
     fn render(&self) {
-        println!("TODO");
+        print!("  ");
+        print!(
+            "sum {} ",
+            format!("{}", self.sum)
+                .with(Color::White)
+                .attribute(Attribute::Bold)
+        );
+        print!(
+            "count {} ",
+            format!("{}", self.count)
+                .with(Color::White)
+                .attribute(Attribute::Bold)
+        );
+        print!("(");
+        for (k, v) in &self.bs {
+            print!("{} {}, ", k.clone().with(Color::DarkGrey), v);
+        }
+        print!(")");
+        print!(" ");
+        for (k, v) in &self.labels {
+            if k != &"le" {
+                print!(
+                    "{}={} ",
+                    AsRef::<str>::as_ref(k).with(Color::Blue), // TODO: horrible we need this
+                    // syntax, or to borrow at all, but
+                    // the labels have to contain
+                    // String. In the driver loop, could
+                    // clone the first line into an Rc
+                    // before parsing?
+                    AsRef::<str>::as_ref(v).with(Color::Green)
+                );
+            }
+        }
+        println!()
     }
+}
+
+enum BreakType {
+    NewLabels,
+    NewMetric(String),
+    EOF,
 }
 
 fn parse_metrics(
     lines: &mut std::io::Lines<std::io::StdinLock<'static>>,
     metric_name: &str,
     parser: &mut Box<dyn MetricParser>,
-) -> ((), Option<String>) {
+) -> BreakType {
     loop {
         // On EOF / read error; ie no more input, stop
         if let Some(ref metric) = lines.next().and_then(|l| l.ok()) {
@@ -190,12 +221,15 @@ fn parse_metrics(
             if let Ok((line_name, labels, val)) = parse_metric(metric) {
                 assert!(line_name.starts_with(metric_name));
 
-                parser.parse_line(line_name, labels, val);
+                // it's made the control flow horrible too. In the outer fn, keep a cloned copy of current_labels, compare each time. Merge this loop with the outer one
+                if parser.parse_line(line_name, labels, val) {
+                    return BreakType::NewLabels;
+                }
             } else {
-                return ((), Some(metric.to_owned()));
+                return BreakType::NewMetric(metric.to_owned());
             }
         } else {
-            return ((), None);
+            return BreakType::EOF;
         }
     }
 }
@@ -206,7 +240,7 @@ fn main() -> anyhow::Result<()> {
     let mut lines = std::io::stdin().lines();
     let mut hack_help_line = None;
 
-    loop {
+    'all: loop {
         let help_line = hack_help_line.unwrap_or_else(|| lines.next().unwrap().unwrap());
         let type_line = lines.next().unwrap().unwrap();
 
@@ -224,14 +258,22 @@ fn main() -> anyhow::Result<()> {
             desc,
         );
 
-        let mut parser: Box<dyn MetricParser> = match typ {
-            "gauge" | "counter" => Box::new(GaugeCounterParser::new()),
-            "histogram" | "summary" => Box::new(HistSummaryParser::new(name)),
-            _ => panic!("Unknown metric type"),
-        };
-        (_, hack_help_line) = parse_metrics(&mut lines, name, &mut parser);
-        if hack_help_line.is_none() {
-            break;
+        'metric: loop {
+            let mut parser: Box<dyn MetricParser> = match typ {
+                "gauge" | "counter" => Box::new(GaugeCounterParser::new()),
+                "histogram" | "summary" => Box::new(HistSummaryParser::new(name)),
+                _ => panic!("Unknown metric type"),
+            };
+            let brk = parse_metrics(&mut lines, name, &mut parser);
+            parser.render();
+            match brk {
+                BreakType::NewLabels => continue 'metric,
+                BreakType::NewMetric(help_line) => {
+                    hack_help_line = Some(help_line);
+                    break 'metric;
+                }
+                BreakType::EOF => break 'all,
+            }
         }
     }
 
